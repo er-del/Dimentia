@@ -36,25 +36,25 @@ pip install -e ".[dev]"
 
 ```bash
 # Convert a video with pop-out 3D (default mode)
-dimendia convert input.mp4 output.mp4
+python -m dimendia.cli.convert convert input.mp4 output.mp4
 
 # Fast mode, depth preview
-dimendia convert input.mp4 output.mp4 --mode fast --depth-preview
+python -m dimendia.cli.convert convert input.mp4 output.mp4 --mode fast --depth-preview
 
 # Quality mode, increased pop-out
-dimendia convert input.mp4 output.mp4 --mode quality --extrusion 150
+python -m dimendia.cli.convert convert input.mp4 output.mp4 --mode quality --extrusion 150
 
 # Stereoscopic side-by-side output
-dimendia convert input.mp4 output_sbs.mp4 --stereo
+python -m dimendia.cli.convert convert input.mp4 output_sbs.mp4 --stereo
 
 # VR (half-SBS for headsets)
-dimendia convert input.mp4 output_vr.mp4 --vr
+python -m dimendia.cli.convert convert input.mp4 output_vr.mp4 --vr
 
 # Check which backends resolved
-dimendia info
+python -m dimendia.cli.convert info
 
 # End-to-end self-test (synthetic clip, CPU, no downloads)
-dimendia selftest
+python -m dimendia.cli.convert selftest
 ```
 
 ### CLI Options
