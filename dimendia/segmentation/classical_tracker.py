@@ -1,0 +1,168 @@
+"""Weight-free object tracker: motion + saliency + depth -> tracked masks.
+
+Builds a foreground probability from optical-flow motion, spectral-residual
+saliency, and depth proximity; thresholds it into connected components; optionally
+tightens each with GrabCut; then associates components to the previous frame by
+IoU to assign stable ids and estimate velocity. This is the fallback used when
+SAM2 is not installed, and it keeps the whole pipeline runnable on CPU.
+"""
+
+from __future__ import annotations
+
+import cv2
+import numpy as np
+
+from dimendia.config import Mode, PipelineConfig
+from dimendia.imageops import normalize01
+from dimendia.segmentation.base import ObjectTracker
+from dimendia.segmentation.flow import flow_magnitude
+from dimendia.segmentation.saliency import spectral_residual_saliency
+from dimendia.types import DepthMap, Frame, TrackedObject
+
+
+class ClassicalTracker(ObjectTracker):
+    name = "classical"
+
+    def __init__(self, config: PipelineConfig):
+        self.config = config
+        self.max_objects = 4
+        self.use_grabcut = config.mode != Mode.FAST
+        self.min_area_ratio = 0.005
+        self.max_area_ratio = 0.85
+        self._prev: list[TrackedObject] = []
+        self._next_id = 0
+
+    def reset(self) -> None:
+        self._prev = []
+        self._next_id = 0
+
+    def track(self, frame: Frame, depth: DepthMap, flow: np.ndarray | None) -> list[TrackedObject]:
+        h, w = frame.shape[:2]
+        fg = self._foreground_probability(frame, depth, flow)
+        components = self._components(fg, h, w)
+
+        objects: list[TrackedObject] = []
+        saliency = spectral_residual_saliency(frame)
+        for mask in components:
+            if self.use_grabcut:
+                mask = self._refine_grabcut(frame, mask)
+            obj = self._describe(mask, depth, saliency, frame.shape[:2])
+            if obj is not None:
+                objects.append(obj)
+
+        objects = self._associate(objects)
+        self._prev = objects
+        return objects
+
+    # -- cue fusion ----------------------------------------------------------
+
+    def _foreground_probability(
+        self, frame: Frame, depth: DepthMap, flow: np.ndarray | None
+    ) -> np.ndarray:
+        saliency = spectral_residual_saliency(frame)
+        proximity = normalize01(depth)
+        if flow is not None:
+            motion = normalize01(flow_magnitude(flow))
+            fg = 0.45 * motion + 0.30 * saliency + 0.25 * proximity
+        else:  # first frame / static: rely on appearance + depth
+            fg = 0.55 * saliency + 0.45 * proximity
+        return normalize01(fg)
+
+    def _components(self, fg: np.ndarray, h: int, w: int) -> list[np.ndarray]:
+        u8 = (fg * 255).astype(np.uint8)
+        _, binary = cv2.threshold(u8, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
+        binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
+
+        n, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
+        frame_area = h * w
+        scored: list[tuple[float, np.ndarray]] = []
+        for label in range(1, n):
+            area = int(stats[label, cv2.CC_STAT_AREA])
+            ratio = area / frame_area
+            if ratio < self.min_area_ratio or ratio > self.max_area_ratio:
+                continue
+            mask = labels == label
+            scored.append((float(fg[mask].mean()) * ratio, mask))
+        scored.sort(key=lambda t: t[0], reverse=True)
+        return [m for _, m in scored[: self.max_objects]]
+
+    def _refine_grabcut(self, frame: Frame, mask: np.ndarray) -> np.ndarray:
+        ys, xs = np.where(mask)
+        if xs.size == 0:
+            return mask
+        pad = 6
+        h, w = mask.shape
+        x0 = max(0, int(xs.min()) - pad)
+        y0 = max(0, int(ys.min()) - pad)
+        x1 = min(w - 1, int(xs.max()) + pad)
+        y1 = min(h - 1, int(ys.max()) + pad)
+        if x1 - x0 < 8 or y1 - y0 < 8:
+            return mask
+        gc = np.full(mask.shape, cv2.GC_PR_BGD, dtype=np.uint8)
+        gc[y0:y1, x0:x1] = cv2.GC_PR_FGD
+        gc[mask] = cv2.GC_FGD
+        bgd = np.zeros((1, 65), np.float64)
+        fgd = np.zeros((1, 65), np.float64)
+        try:
+            bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+            cv2.grabCut(bgr, gc, None, bgd, fgd, 3, cv2.GC_INIT_WITH_MASK)  # type: ignore[call-overload]
+        except cv2.error:
+            return mask
+        refined = (gc == cv2.GC_FGD) | (gc == cv2.GC_PR_FGD)
+        return refined if refined.sum() > 0.2 * mask.sum() else mask
+
+    # -- object description & association ------------------------------------
+
+    def _describe(
+        self,
+        mask: np.ndarray,
+        depth: DepthMap,
+        saliency: np.ndarray,
+        shape: tuple[int, int],
+    ) -> TrackedObject | None:
+        h, w = shape
+        area = int(mask.sum())
+        if area == 0:
+            return None
+        ys, xs = np.where(mask)
+        cx = float(xs.mean())
+        cy = float(ys.mean())
+        return TrackedObject(
+            object_id=-1,  # assigned during association
+            mask=mask,
+            centroid=(cx, cy),
+            mean_depth=float(depth[mask].mean()),
+            area_ratio=area / float(h * w),
+            saliency=float(saliency[mask].mean()),
+        )
+
+    def _associate(self, objects: list[TrackedObject]) -> list[TrackedObject]:
+        for obj in objects:
+            best_iou = 0.0
+            best_prev: TrackedObject | None = None
+            for prev in self._prev:
+                iou = _mask_iou(obj.mask, prev.mask)
+                if iou > best_iou:
+                    best_iou = iou
+                    best_prev = prev
+            if best_prev is not None and best_iou > 0.1:
+                obj.object_id = best_prev.object_id
+                obj.velocity = (
+                    obj.centroid[0] - best_prev.centroid[0],
+                    obj.centroid[1] - best_prev.centroid[1],
+                )
+            else:
+                obj.object_id = self._next_id
+                self._next_id += 1
+            obj.velocity_mag = float(np.hypot(*obj.velocity))
+        return objects
+
+
+def _mask_iou(a: np.ndarray, b: np.ndarray) -> float:
+    if a.shape != b.shape:
+        return 0.0
+    inter = np.logical_and(a, b).sum()
+    union = np.logical_or(a, b).sum()
+    return float(inter) / float(union) if union > 0 else 0.0

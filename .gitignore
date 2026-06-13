@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# Models / weights (never commit)
+*.pth
+*.pt
+*.onnx
+*.safetensors
+checkpoints/
+weights/
+
+# Media outputs / scratch
+*.mp4
+*.mov
+*.avi
+!docs/**/*.mp4
+outputs/
+scratch/
+
+# OS / editors
+.DS_Store
+.idea/
+.vscode/

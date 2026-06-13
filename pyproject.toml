@@ -1,0 +1,81 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dimendia"
+version = "0.1.0"
+description = "Convert monocular videos into cinematic pop-out 3D videos via depth-aware layered scene reconstruction."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "DIMENDIA contributors" }]
+keywords = ["3d", "depth", "video", "pop-out", "stereoscopic", "computer-vision"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Topic :: Multimedia :: Video",
+    "Topic :: Scientific/Engineering :: Image Processing",
+]
+
+# Core dependencies are intentionally light and CPU-runnable so the whole
+# pipeline works without a GPU or any model downloads (via classical fallbacks).
+dependencies = [
+    "numpy>=1.24",
+    "opencv-python-headless>=4.8",
+    "imageio>=2.31",
+    "imageio-ffmpeg>=0.4.9",
+    "scipy>=1.10",
+    "click>=8.1",
+    "pydantic>=2.5",
+    "tqdm>=4.66",
+]
+
+[project.optional-dependencies]
+# Heavy, GPU-oriented model backends. Opt-in: `pip install dimendia[models]`.
+models = [
+    "torch>=2.1",
+    "torchvision>=0.16",
+    "transformers>=4.39",
+    "timm>=0.9",
+    "safetensors>=0.4",
+]
+dev = [
+    "pytest>=7.4",
+    "ruff>=0.4",
+    "black>=24.3",
+    "mypy>=1.9",
+    "types-tqdm",
+]
+
+[project.urls]
+Homepage = "https://github.com/er-del/Dimentia"
+Repository = "https://github.com/er-del/Dimentia"
+
+[project.scripts]
+dimendia = "dimendia.cli.convert:main"
+
+[tool.setuptools.packages.find]
+include = ["dimendia*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "C4"]
+ignore = ["E501", "B008"]
+
+[tool.black]
+line-length = 100
+target-version = ["py310"]
+
+[tool.mypy]
+python_version = "3.10"
+warn_unused_ignores = false
+ignore_missing_imports = true
+disallow_untyped_defs = false
+no_implicit_optional = true
+check_untyped_defs = true
+exclude = ["build/", "dist/"]
