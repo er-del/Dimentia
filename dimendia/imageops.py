@@ -16,21 +16,31 @@ def normalize01(x: np.ndarray, eps: float = 1e-6) -> np.ndarray:
     return ((x - lo) / (hi - lo)).astype(np.float32)
 
 
+def _align8(n: int) -> int:
+    """Round *n* up to the nearest multiple of 8."""
+    return max(8, (n + 7) & ~7)
+
+
 def resize_long_edge(frame: np.ndarray, long_edge: int) -> np.ndarray:
-    """Resize so the longer side equals ``long_edge`` (no upscaling)."""
+    """Resize so the longer side equals ``long_edge`` (no upscaling).
+
+    Both dimensions are rounded to the nearest multiple of 8 so that models
+    like RAFT (which require H/W divisible by 8) work correctly.
+    """
     h, w = frame.shape[:2]
     cur = max(h, w)
     if cur <= long_edge:
         return frame
     scale = long_edge / float(cur)
-    new_w = max(1, int(round(w * scale)))
-    new_h = max(1, int(round(h * scale)))
+    new_w = _align8(max(1, int(round(w * scale))))
+    new_h = _align8(max(1, int(round(h * scale))))
     return cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_AREA)
 
 
-def resize_to(arr: np.ndarray, size_wh: tuple[int, int]) -> np.ndarray:
+def resize_to(arr: np.ndarray, size_wh: tuple[int, int], align: bool = False) -> np.ndarray:
     """Resize an array to ``(width, height)`` choosing a sensible interpolation."""
-    w, h = size_wh
+    w = _align8(size_wh[0]) if align else size_wh[0]
+    h = _align8(size_wh[1]) if align else size_wh[1]
     if arr.shape[1] == w and arr.shape[0] == h:
         return arr
     up = w * h > arr.shape[1] * arr.shape[0]

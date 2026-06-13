@@ -27,6 +27,23 @@ from dimendia.config import (
 from dimendia.pipeline import DimendiaPipeline, ProgressEvent, convert_video
 
 
+def _parse_timestamp(value: str) -> float:
+    """Parse a timestamp string into seconds.
+
+    Accepted formats: ``HH:MM:SS``, ``MM:SS``, ``SS``, or a raw float.
+    """
+    parts = value.strip().split(":")
+    if len(parts) == 3:
+        h, m, s = parts
+        return int(h) * 3600 + int(m) * 60 + float(s)
+    if len(parts) == 2:
+        m, s = parts
+        return int(m) * 60 + float(s)
+    if len(parts) == 1:
+        return float(parts[0])
+    raise click.BadParameter(f"Invalid timestamp format: {value!r}")
+
+
 @click.group()
 @click.version_option(package_name="dimendia")
 def main() -> None:
@@ -83,6 +100,24 @@ def _resolve_render_mode(render_mode: str, stereo: bool, vr: bool) -> RenderMode
     default=InpaintingBackend.AUTO.value,
     show_default=True,
 )
+@click.option(
+    "--start",
+    type=str,
+    default=None,
+    help="Start timestamp (HH:MM:SS, MM:SS, or seconds). Only process from this point.",
+)
+@click.option(
+    "--end",
+    type=str,
+    default=None,
+    help="End timestamp (HH:MM:SS, MM:SS, or seconds). Stop processing at this point.",
+)
+@click.option(
+    "--fps",
+    type=float,
+    default=None,
+    help="Target output frames per second (e.g. 24, 30). Default matches input.",
+)
 def convert(
     input_path: str,
     output_path: str,
@@ -96,6 +131,9 @@ def convert(
     depth_backend: str,
     segmentation_backend: str,
     inpainting_backend: str,
+    start: str | None,
+    end: str | None,
+    fps: float | None,
 ) -> None:
     """Convert INPUT_PATH (mp4/mov/avi) into a pop-out 3D video at OUTPUT_PATH."""
     resolved_render = _resolve_render_mode(render_mode, stereo, vr)
@@ -107,8 +145,23 @@ def convert(
         segmentation_backend=SegmentationBackend(segmentation_backend),
         inpainting_backend=InpaintingBackend(inpainting_backend),
         write_depth_preview=depth_preview,
+        output_fps=fps,
     )
     pipeline = DimendiaPipeline(config, device=device)
+
+    # Resolve timestamps to frame indices (need fps first).
+    start_frame = 0
+    end_frame = None
+    if start is not None or end is not None:
+        from dimendia.io import VideoReader as _VR
+
+        _probe = _VR(input_path)
+        fps = _probe.meta.fps
+        _probe.close()
+        if start is not None:
+            start_frame = int(round(_parse_timestamp(start) * fps))
+        if end is not None:
+            end_frame = int(round(_parse_timestamp(end) * fps))
 
     bar = tqdm(desc="DIMENDIA", unit="f")
 
@@ -117,7 +170,13 @@ def convert(
             bar.total = ev.total
         bar.update(1)
 
-    result = pipeline.convert(input_path, output_path, progress=on_progress)
+    result = pipeline.convert(
+        input_path,
+        output_path,
+        progress=on_progress,
+        start_frame=start_frame,
+        end_frame=end_frame,
+    )
     bar.close()
     click.echo(
         f"Wrote {result.output_path} ({result.frames} frames, {result.width}x{result.height})"

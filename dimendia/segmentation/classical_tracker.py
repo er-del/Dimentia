@@ -9,15 +9,45 @@ SAM2 is not installed, and it keeps the whole pipeline runnable on CPU.
 
 from __future__ import annotations
 
+import threading
+
 import cv2
 import numpy as np
 
 from dimendia.config import Mode, PipelineConfig
 from dimendia.imageops import normalize01
+from dimendia.logging import get_logger
 from dimendia.segmentation.base import ObjectTracker
 from dimendia.segmentation.flow import flow_magnitude
 from dimendia.segmentation.saliency import spectral_residual_saliency
 from dimendia.types import DepthMap, Frame, TrackedObject
+
+log = get_logger(__name__)
+
+_GRABCUT_TIMEOUT = 15  # seconds
+
+
+def _grabcut_with_timeout(bgr, gc, bgd, fgd, iterations: int, timeout: int = _GRABCUT_TIMEOUT) -> bool:
+    """Run cv2.grabCut with a timeout so large masks don't hang the pipeline."""
+    exc: list[BaseException | None] = [None]
+
+    def _target() -> None:
+        try:
+            cv2.grabCut(bgr, gc, None, bgd, fgd, iterations, cv2.GC_INIT_WITH_MASK)
+        except BaseException as e:
+            exc[0] = e
+
+    t = threading.Thread(target=_target, daemon=True)
+    t.start()
+    t.join(timeout=timeout)
+    if t.is_alive():
+        log.warning("cv2.grabCut timed out after %ds; skipping refinement", timeout)
+        return False
+    if exc[0] is not None:
+        if isinstance(exc[0], cv2.error):
+            return False
+        raise exc[0]  # type: ignore[misc]
+    return True
 
 
 class ClassicalTracker(ObjectTracker):
@@ -27,8 +57,10 @@ class ClassicalTracker(ObjectTracker):
         self.config = config
         self.max_objects = 4
         self.use_grabcut = config.mode != Mode.FAST
-        self.min_area_ratio = 0.005
-        self.max_area_ratio = 0.85
+        # Raised min area to filter noise fragments that become black blobs.
+        self.min_area_ratio = 0.01
+        # Lowered max area to avoid selecting the entire frame as foreground.
+        self.max_area_ratio = 0.70
         self._prev: list[TrackedObject] = []
         self._next_id = 0
 
@@ -71,9 +103,14 @@ class ClassicalTracker(ObjectTracker):
     def _components(self, fg: np.ndarray, h: int, w: int) -> list[np.ndarray]:
         u8 = (fg * 255).astype(np.uint8)
         _, binary = cv2.threshold(u8, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        # Larger kernel for cleaner mask boundaries.
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
         binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
         binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
+        # Additional smoothing pass: dilate then erode to fill small holes.
+        kernel_sm = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        binary = cv2.dilate(binary, kernel_sm, iterations=1)
+        binary = cv2.erode(binary, kernel_sm, iterations=1)
 
         n, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
         frame_area = h * w
@@ -105,10 +142,9 @@ class ClassicalTracker(ObjectTracker):
         gc[mask] = cv2.GC_FGD
         bgd = np.zeros((1, 65), np.float64)
         fgd = np.zeros((1, 65), np.float64)
-        try:
-            bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-            cv2.grabCut(bgr, gc, None, bgd, fgd, 3, cv2.GC_INIT_WITH_MASK)  # type: ignore[call-overload]
-        except cv2.error:
+        bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+        ok = _grabcut_with_timeout(bgr, gc, bgd, fgd, 3)
+        if not ok:
             return mask
         refined = (gc == cv2.GC_FGD) | (gc == cv2.GC_PR_FGD)
         return refined if refined.sum() > 0.2 * mask.sum() else mask
@@ -153,6 +189,13 @@ class ClassicalTracker(ObjectTracker):
                     obj.centroid[0] - best_prev.centroid[0],
                     obj.centroid[1] - best_prev.centroid[1],
                 )
+                # Temporal mask smoothing: blend with previous to prevent popping.
+                if obj.mask.shape == best_prev.mask.shape:
+                    blended = (
+                        0.7 * obj.mask.astype(np.float32)
+                        + 0.3 * best_prev.mask.astype(np.float32)
+                    )
+                    obj.mask = blended > 0.4
             else:
                 obj.object_id = self._next_id
                 self._next_id += 1

@@ -94,6 +94,9 @@ class PipelineConfig(BaseModel):
     # Toggles.
     inpaint: bool = True
     write_depth_preview: bool = False
+    
+    # Target output framerate. If None, matches input fps.
+    output_fps: float | None = None
 
     @property
     def num_layers(self) -> int:

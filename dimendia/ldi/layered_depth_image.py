@@ -61,7 +61,7 @@ class LayeredDepthImage:
 class LDIBuilder:
     """Assemble a :class:`LayeredDepthImage` from a frame, depth, and tracked objects."""
 
-    def __init__(self, foreground_percentile: float = 70.0, feather_radius: int = 3):
+    def __init__(self, foreground_percentile: float = 70.0, feather_radius: int = 5):
         self.foreground_percentile = foreground_percentile
         self.feather_radius = feather_radius
 
@@ -125,7 +125,8 @@ class LDIBuilder:
                 index=2,
                 color=bg_color,
                 alpha=np.ones((h, w), dtype=np.float32),
-                depth=normalize01(bg_depth) * 0.5,  # push background away
+                # Push background away but maintain more natural depth variation.
+                depth=normalize01(bg_depth) * 0.4 + 0.05,
             )
         )
 
@@ -133,7 +134,19 @@ class LDIBuilder:
 
     @staticmethod
     def _inpaint_depth(depth: DepthMap, hole: Mask) -> DepthMap:
+        import threading
+
         d8 = (np.clip(depth, 0, 1) * 255).astype(np.uint8)
         mask = (hole.astype(np.uint8)) * 255
-        filled = cv2.inpaint(d8, mask, 3, cv2.INPAINT_TELEA)
-        return filled.astype(np.float32) / 255.0
+
+        result: list[np.ndarray] = [d8]
+
+        def _target() -> None:
+            result[0] = cv2.inpaint(d8, mask, 3, cv2.INPAINT_TELEA)
+
+        t = threading.Thread(target=_target, daemon=True)
+        t.start()
+        t.join(timeout=15)
+        if t.is_alive():
+            return depth
+        return result[0].astype(np.float32) / 255.0

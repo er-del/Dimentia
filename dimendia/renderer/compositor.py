@@ -41,6 +41,52 @@ def warp_layer(
     return out_color, out_alpha
 
 
+def warp_layer_depth(
+    color: np.ndarray,
+    alpha: np.ndarray,
+    depth: np.ndarray,
+    dx_scale: float,
+    dy_scale: float,
+    scale: float,
+    center: tuple[float, float],
+    solid: bool,
+    depth_ref: float = 0.5,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Per-pixel depth-based warp: each pixel is displaced by its depth value.
+
+    Near pixels (depth > depth_ref) move one direction, far pixels the other,
+    creating genuine parallax. ``dx_scale`` / ``dy_scale`` set the maximum
+    displacement in pixels at full depth contrast.
+    """
+    h, w = alpha.shape
+
+    # Build per-pixel displacement from depth.
+    d = depth.astype(np.float32)
+    disp = d - depth_ref  # negative for far, positive for near
+
+    grid_y, grid_x = np.mgrid[0:h, 0:w].astype(np.float32)
+
+    # Apply scale around center.
+    cx, cy = center
+    grid_x = cx + (grid_x - cx) / max(scale, 1e-6)
+    grid_y = cy + (grid_y - cy) / max(scale, 1e-6)
+
+    # Apply depth-based displacement (inverse mapping: where to sample FROM).
+    map_x = grid_x - dx_scale * disp
+    map_y = grid_y - dy_scale * disp
+
+    color_border = cv2.BORDER_REPLICATE if solid else cv2.BORDER_CONSTANT
+    out_color = cv2.remap(
+        color, map_x, map_y, cv2.INTER_LINEAR,
+        borderMode=color_border, borderValue=(0, 0, 0),
+    )
+    out_alpha = cv2.remap(
+        alpha, map_x, map_y, cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_CONSTANT, borderValue=0,
+    )
+    return out_color, out_alpha
+
+
 def over(base: np.ndarray, color: np.ndarray, alpha: np.ndarray) -> np.ndarray:
     """Alpha-composite ``color`` over ``base`` (all float32 HxWx3 / HxW)."""
     a = np.clip(alpha, 0.0, 1.0)[..., None]

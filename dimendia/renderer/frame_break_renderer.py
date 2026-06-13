@@ -26,6 +26,7 @@ from dimendia.renderer.compositor import (
     over,
     to_uint8,
     warp_layer,
+    warp_layer_depth,
 )
 from dimendia.types import Frame
 
@@ -36,7 +37,8 @@ class FrameBreakRenderer:
         self.sway_period = 90.0  # frames per full left-right cycle
 
     def _viewpoint_dx(self, frame_index: int, width: int) -> float:
-        amp = (self.config.extrusion / 100.0) * 0.05 * width
+        # Reduced amplitude: 0.02 instead of 0.05 for subtler, more natural sway.
+        amp = (self.config.extrusion / 100.0) * 0.02 * width
         return amp * math.sin(2.0 * math.pi * frame_index / self.sway_period)
 
     def render(self, ldi: LayeredDepthImage, frame_index: int) -> Frame:
@@ -52,9 +54,14 @@ class FrameBreakRenderer:
         center = (w / 2.0, h / 2.0)
         warped: list[tuple[np.ndarray, np.ndarray]] = []
         for layer in ldi.layers:  # near -> far
-            sx = -dx_view * layer.mean_depth
+            # Per-pixel depth warp for genuine parallax separation.
+            dx_max = -dx_view * 2.0  # scale factor for depth-based displacement
             solid = layer.name == "background"
-            warped.append(warp_layer(layer.color, layer.alpha, sx, 0.0, 1.0, center, solid=solid))
+            warped.append(warp_layer_depth(
+                layer.color, layer.alpha, layer.depth,
+                dx_scale=dx_max, dy_scale=0.0,
+                scale=1.0, center=center, solid=solid,
+            ))
         composed = composite_back_to_front(list(reversed(warped)), h, w)
         return to_uint8(composed)
 
@@ -71,16 +78,24 @@ class FrameBreakRenderer:
         for layer in ldi.layers:  # near -> far
             if layer.index == 0:  # primary extrusion object
                 obj_center = layer_center(layer.alpha)
-                scale = 1.0 + 0.10 * strength
-                sx = -dx_view * layer.mean_depth * 1.8  # exaggerated parallax
-                primary = warp_layer(
-                    layer.color, layer.alpha, sx, 0.0, scale, obj_center, solid=False
+                # Reduced scale: 3% max instead of 10%.
+                scale = 1.0 + 0.03 * strength
+                # Per-pixel depth warp with moderately exaggerated parallax.
+                dx_max = -dx_view * 1.3 * 2.0
+                primary = warp_layer_depth(
+                    layer.color, layer.alpha, layer.depth,
+                    dx_scale=dx_max, dy_scale=0.0,
+                    scale=scale, center=obj_center, solid=False,
                 )
             else:
-                sx = -dx_view * layer.mean_depth
+                dx_max = -dx_view * 2.0
                 solid = layer.name == "background"
                 background_layers.append(
-                    warp_layer(layer.color, layer.alpha, sx, 0.0, 1.0, center, solid=solid)
+                    warp_layer_depth(
+                        layer.color, layer.alpha, layer.depth,
+                        dx_scale=dx_max, dy_scale=0.0,
+                        scale=1.0, center=center, solid=solid,
+                    )
                 )
 
         base = composite_back_to_front(list(reversed(background_layers)), h, w)
@@ -89,8 +104,10 @@ class FrameBreakRenderer:
 
         if primary is not None:
             p_color, p_alpha = primary
-            shadow = drop_shadow(p_alpha, offset=int(6 + 10 * strength), blur=int(4 + 6 * strength))
-            base = base * (1.0 - 0.45 * shadow[..., None])  # contact shadow on bars
+            shadow = drop_shadow(p_alpha, offset=int(4 + 6 * strength), blur=int(3 + 4 * strength))
+            # Softer shadow: 0.25 instead of 0.45.
+            base = base * (1.0 - 0.25 * shadow[..., None])
             base = over(base, p_color.astype(np.float32), p_alpha)
 
         return to_uint8(base)
+

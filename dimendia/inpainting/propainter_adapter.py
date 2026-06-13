@@ -89,7 +89,10 @@ class ProPainterAdapter(Inpainter):
                 "--save_frames",
             ]
             try:
-                subprocess.run(cmd, check=True, capture_output=True, cwd=self.dir)
+                subprocess.run(cmd, check=True, capture_output=True, cwd=self.dir, timeout=300)
+            except subprocess.TimeoutExpired:
+                log.warning("ProPainter inference timed out after 300s; using raw frame")
+                return None
             except subprocess.CalledProcessError as exc:  # pragma: no cover
                 log.warning("ProPainter inference failed (%s); using raw frame", exc.returncode)
                 return None

@@ -17,7 +17,7 @@ import numpy as np
 
 from dimendia.config import PipelineConfig, RenderMode
 from dimendia.ldi.layered_depth_image import LayeredDepthImage
-from dimendia.renderer.compositor import composite_back_to_front, to_uint8, warp_layer
+from dimendia.renderer.compositor import composite_back_to_front, to_uint8, warp_layer_depth
 from dimendia.types import Frame
 
 _SCREEN_PLANE = 0.5  # depth that renders exactly at the display surface
@@ -40,10 +40,15 @@ class StereoRenderer:
         center = (w / 2.0, h / 2.0)
         warped: list[tuple[np.ndarray, np.ndarray]] = []
         for layer in ldi.layers:  # near -> far
-            disparity = baseline_px * (layer.mean_depth - _SCREEN_PLANE)
-            sx = sign * disparity * 0.5
+            # Per-pixel depth warp for genuine stereo disparity.
+            dx_max = sign * baseline_px * 0.5
             solid = layer.name == "background"
-            warped.append(warp_layer(layer.color, layer.alpha, sx, 0.0, 1.0, center, solid=solid))
+            warped.append(warp_layer_depth(
+                layer.color, layer.alpha, layer.depth,
+                dx_scale=dx_max, dy_scale=0.0,
+                scale=1.0, center=center, solid=solid,
+                depth_ref=_SCREEN_PLANE,
+            ))
         composed = composite_back_to_front(list(reversed(warped)), h, w)
         return to_uint8(composed)
 

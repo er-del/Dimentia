@@ -8,11 +8,44 @@ This is the default inpainter and runs everywhere.
 
 from __future__ import annotations
 
+import threading
+
 import cv2
 import numpy as np
 
 from dimendia.inpainting.base import Inpainter
+from dimendia.logging import get_logger
 from dimendia.types import Frame, Mask
+
+log = get_logger(__name__)
+
+_INPAINT_TIMEOUT = 30  # seconds
+
+
+def _inpaint_telea(frame: np.ndarray, mask: np.ndarray, radius: int) -> np.ndarray:
+    """Run cv2.inpaint with a timeout so large holes don't hang the pipeline."""
+    result: list[np.ndarray] = [frame]
+    exc: list[BaseException | None] = [None]
+
+    def _target() -> None:
+        try:
+            result[0] = cv2.inpaint(frame, mask, radius, cv2.INPAINT_TELEA)
+        except BaseException as e:
+            exc[0] = e
+
+    t = threading.Thread(target=_target, daemon=True)
+    t.start()
+    t.join(timeout=_INPAINT_TIMEOUT)
+    if t.is_alive():
+        log.warning(
+            "cv2.inpaint timed out after %ds (hole ratio %.0f%%); using original frame",
+            _INPAINT_TIMEOUT,
+            (mask > 0).sum() / mask.size * 100,
+        )
+        return frame
+    if exc[0] is not None:
+        raise exc[0]  # type: ignore[misc]
+    return result[0]
 
 
 class ClassicalInpainter(Inpainter):
@@ -37,19 +70,26 @@ class ClassicalInpainter(Inpainter):
             hole = cv2.dilate(hole, kernel)
         hole_bool = hole.astype(bool)
 
-        filled = cv2.inpaint(frame, hole * 255, self.radius, cv2.INPAINT_TELEA)
+        filled = _inpaint_telea(frame, hole * 255, 5)
 
         gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
         if self._prev_filled is not None and self._prev_filled.shape == filled.shape:
             warped = self._warp_prev(gray)
             a = self.temporal_alpha
             blended = a * filled.astype(np.float32) + (1.0 - a) * warped.astype(np.float32)
-            blended = np.clip(blended, 0, 255).astype(np.uint8)
-            out = frame.copy()
-            out[hole_bool] = blended[hole_bool]
-        else:
-            out = frame.copy()
-            out[hole_bool] = filled[hole_bool]
+            filled = np.clip(blended, 0, 255).astype(np.uint8)
+
+        out = frame.copy()
+        
+        # Color-aware boundary blending (feathering) for seamless transitions.
+        # Create a soft alpha matte from the dilated hole mask.
+        alpha_hole = hole.astype(np.float32)
+        alpha_hole = cv2.GaussianBlur(alpha_hole, (7, 7), 0)
+        alpha_hole = np.clip(alpha_hole, 0.0, 1.0)[..., None]
+        
+        # Blend the filled content over the original frame using the soft matte.
+        out = (filled.astype(np.float32) * alpha_hole + frame.astype(np.float32) * (1.0 - alpha_hole))
+        out = np.clip(out, 0, 255).astype(np.uint8)
 
         self._prev_filled = out
         self._prev_gray = gray

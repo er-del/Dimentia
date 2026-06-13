@@ -20,7 +20,7 @@ checkpoints/
 weights/
 
 # Media outputs / scratch
-*.mp4
+
 *.mov
 *.avi
 !docs/**/*.mp4
@@ -31,3 +31,6 @@ scratch/
 .DS_Store
 .idea/
 .vscode/
+
+#examples
+output_frame90.jpg

@@ -41,6 +41,8 @@ class OpticalFlow:
             from torchvision.models.optical_flow import Raft_Small_Weights, raft_small
 
             dev = device or ("cuda" if torch.cuda.is_available() else "cpu")
+            if dev == "cpu":
+                raise RuntimeError("CPU device detected; falling back to Farneback for performance")
             weights = Raft_Small_Weights.DEFAULT
             model = raft_small(weights=weights, progress=False).to(dev).eval()
             self._raft = model
