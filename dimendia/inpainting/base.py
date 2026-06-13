@@ -12,7 +12,7 @@ from abc import ABC, abstractmethod
 
 from dimendia.config import InpaintingBackend
 from dimendia.logging import get_logger
-from dimendia.types import Frame, Mask
+from dimendia.types import DepthMap, Frame, Mask
 
 log = get_logger(__name__)
 
@@ -21,8 +21,12 @@ class Inpainter(ABC):
     name: str = "base"
 
     @abstractmethod
-    def inpaint(self, frame: Frame, mask: Mask) -> Frame:
-        """Fill the ``True`` region of ``mask`` in ``frame`` and return RGB uint8."""
+    def inpaint(self, frame: Frame, mask: Mask, depth: DepthMap | None = None) -> Frame:
+        """Fill the ``True`` region of ``mask`` in ``frame`` and return RGB uint8.
+
+        ``depth`` is an optional ``[0, 1]`` (1 == near) map letting backends bias
+        the fill toward background-colored source pixels.
+        """
         raise NotImplementedError
 
     def reset(self) -> None:  # noqa: B027 - optional hook, concrete no-op by design

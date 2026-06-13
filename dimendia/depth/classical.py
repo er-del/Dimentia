@@ -42,11 +42,10 @@ class ClassicalDepthEstimator(DepthEstimator):
         gray = to_gray_f32(frame)
         h, w = gray.shape
 
-        # Defocus proxy: energy of the high-frequency residual, then spatially pooled.
-        low = cv2.GaussianBlur(gray, (0, 0), sigmaX=3.0)
-        high = np.abs(gray - low)
-        contrast = cv2.GaussianBlur(high, (0, 0), sigmaX=9.0)
-        contrast = normalize01(contrast)
+        # Defocus proxy: multi-resolution high-frequency energy. Computing the
+        # residual at several Gaussian scales captures both fine and coarse focus
+        # cues; the normalized maps are averaged so no single scale dominates.
+        contrast = self._multiscale_contrast(gray)
 
         # Vertical ground-plane prior: bottom of frame == nearer.
         vprior = np.linspace(0.0, 1.0, h, dtype=np.float32)[:, None]
@@ -69,3 +68,14 @@ class ClassicalDepthEstimator(DepthEstimator):
         radius = max(2, int(round(min(h, w) * 0.02)))
         depth = guided_filter(gray, depth, radius=radius, eps=1e-3)
         return normalize01(depth)
+
+    @staticmethod
+    def _multiscale_contrast(gray: np.ndarray) -> np.ndarray:
+        """Average normalized high-frequency contrast over three Gaussian scales."""
+        maps = []
+        for sigma in (5.0, 9.0, 18.0):
+            low = cv2.GaussianBlur(gray, (0, 0), sigmaX=sigma)
+            high = np.abs(gray - low)
+            pooled = cv2.GaussianBlur(high, (0, 0), sigmaX=sigma)
+            maps.append(normalize01(pooled))
+        return normalize01(np.mean(maps, axis=0).astype(np.float32))

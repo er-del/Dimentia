@@ -50,7 +50,9 @@ def main() -> None:
     """DIMENDIA — turn ordinary video into cinematic pop-out 3D."""
 
 
-def _resolve_render_mode(render_mode: str, stereo: bool, vr: bool) -> RenderMode:
+def _resolve_render_mode(render_mode: str, stereo: bool, vr: bool, anaglyph: bool) -> RenderMode:
+    if anaglyph:
+        return RenderMode.ANAGLYPH
     if vr:
         return RenderMode.VR
     if stereo:
@@ -80,6 +82,7 @@ def _resolve_render_mode(render_mode: str, stereo: bool, vr: bool) -> RenderMode
 )
 @click.option("--stereo", is_flag=True, help="Side-by-side stereoscopic output.")
 @click.option("--vr", is_flag=True, help="Half-width SBS VR output.")
+@click.option("--anaglyph", is_flag=True, help="Red-cyan anaglyph output.")
 @click.option("--depth-preview", is_flag=True, help="Also write a depth visualization video.")
 @click.option("--device", type=str, default=None, help="Force compute device (e.g. cpu, cuda).")
 @click.option(
@@ -126,6 +129,7 @@ def convert(
     extrusion: float,
     stereo: bool,
     vr: bool,
+    anaglyph: bool,
     depth_preview: bool,
     device: str | None,
     depth_backend: str,
@@ -136,7 +140,7 @@ def convert(
     fps: float | None,
 ) -> None:
     """Convert INPUT_PATH (mp4/mov/avi) into a pop-out 3D video at OUTPUT_PATH."""
-    resolved_render = _resolve_render_mode(render_mode, stereo, vr)
+    resolved_render = _resolve_render_mode(render_mode, stereo, vr, anaglyph)
     config = PipelineConfig.from_mode(
         Mode(mode),
         render_mode=resolved_render,

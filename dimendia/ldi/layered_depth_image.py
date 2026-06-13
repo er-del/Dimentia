@@ -18,10 +18,10 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 
-from dimendia.imageops import feather_mask, normalize01
+from dimendia.imageops import feather_mask, matting_refine, normalize01
 from dimendia.types import DepthMap, Frame, Mask, TrackedObject
 
-InpaintFn = Callable[[Frame, Mask], Frame]
+InpaintFn = Callable[[Frame, Mask, DepthMap], Frame]
 
 
 @dataclass
@@ -72,57 +72,76 @@ class LDIBuilder:
         objects: list[TrackedObject],
         primary_id: int | None,
         inpaint_fn: InpaintFn | None = None,
+        num_layers: int = 3,
     ) -> LayeredDepthImage:
         h, w = frame.shape[:2]
+        num_layers = max(3, int(num_layers))
         primary = next((o for o in objects if o.object_id == primary_id), None)
 
         primary_mask = primary.mask if primary is not None else np.zeros((h, w), dtype=bool)
 
-        # Foreground = other tracked objects plus generically near content.
-        fg_mask = np.zeros((h, w), dtype=bool)
-        for obj in objects:
-            if obj.object_id != primary_id:
-                fg_mask |= obj.mask
-        thresh = float(np.percentile(depth, self.foreground_percentile))
-        fg_mask |= depth >= thresh
-        fg_mask &= ~primary_mask
+        def refined_alpha(mask: Mask) -> np.ndarray:
+            coarse = feather_mask(mask, self.feather_radius)
+            return matting_refine(coarse, frame, depth)
 
         layers: list[Layer] = []
 
-        # Layer 0 — primary extrusion object.
+        # Layer 0 — primary extrusion object (extraction unchanged).
         layers.append(
             Layer(
                 name="projectile",
                 index=0,
                 color=frame.copy(),
-                alpha=feather_mask(primary_mask, self.feather_radius),
+                alpha=refined_alpha(primary_mask),
                 depth=depth.copy(),
                 object_id=primary_id,
             )
         )
 
-        # Layer 1 — remaining foreground.
-        layers.append(
-            Layer(
-                name="foreground",
-                index=1,
-                color=frame.copy(),
-                alpha=feather_mask(fg_mask, self.feather_radius),
-                depth=depth.copy(),
-            )
+        # Middle layers — quantize the depth range into (num_layers - 2) bands.
+        # ``num_layers - 1`` percentile thresholds bound ``num_layers - 2`` bands.
+        thresholds = np.sort(
+            np.percentile(depth, np.linspace(30, 95, num_layers - 1)).astype(np.float32)
         )
+        n_bands = num_layers - 2
+        other_objs = np.zeros((h, w), dtype=bool)
+        for obj in objects:
+            if obj.object_id != primary_id:
+                other_objs |= obj.mask
 
-        # Layer 2 — background plate (holes behind nearer layers reconstructed).
-        hole = primary_mask | fg_mask
+        band_union = np.zeros((h, w), dtype=bool)
+        for i in range(n_bands):
+            lo = float(thresholds[i])
+            if i == n_bands - 1:  # nearest band extends to the very front
+                band = depth >= lo
+                band |= other_objs  # keep other tracked objects in the front band
+            else:
+                hi = float(thresholds[i + 1])
+                band = (depth >= lo) & (depth < hi)
+            band &= ~primary_mask
+            band_union |= band
+            name = "foreground" if num_layers == 3 else f"band{i}"
+            layers.append(
+                Layer(
+                    name=name,
+                    index=i + 1,
+                    color=frame.copy(),
+                    alpha=refined_alpha(band),
+                    depth=depth.copy(),
+                )
+            )
+
+        # Far layer — background plate (holes behind nearer layers reconstructed).
+        hole = primary_mask | band_union
         bg_color = frame.copy()
         bg_depth = depth.copy()
         if hole.any() and inpaint_fn is not None:
-            bg_color = inpaint_fn(frame, hole)
+            bg_color = inpaint_fn(frame, hole, depth)
             bg_depth = self._inpaint_depth(depth, hole)
         layers.append(
             Layer(
                 name="background",
-                index=2,
+                index=num_layers - 1,
                 color=bg_color,
                 alpha=np.ones((h, w), dtype=np.float32),
                 # Push background away but maintain more natural depth variation.

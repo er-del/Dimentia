@@ -15,7 +15,8 @@ import numpy as np
 
 from dimendia.inpainting.base import Inpainter
 from dimendia.logging import get_logger
-from dimendia.types import Frame, Mask
+from dimendia.segmentation.flow import compute_occlusion_mask
+from dimendia.types import DepthMap, Frame, Mask
 
 log = get_logger(__name__)
 
@@ -62,7 +63,7 @@ class ClassicalInpainter(Inpainter):
         self._prev_filled = None
         self._prev_gray = None
 
-    def inpaint(self, frame: Frame, mask: Mask) -> Frame:
+    def inpaint(self, frame: Frame, mask: Mask, depth: DepthMap | None = None) -> Frame:
         h, w = frame.shape[:2]
         hole: np.ndarray = mask.astype(np.uint8)
         if self.dilate > 0:
@@ -70,32 +71,42 @@ class ClassicalInpainter(Inpainter):
             hole = cv2.dilate(hole, kernel)
         hole_bool = hole.astype(bool)
 
-        filled = _inpaint_telea(frame, hole * 255, 5)
+        # Depth-context: exclude foreground pixels from the Telea source so only
+        # background-colored pixels diffuse into the holes.
+        fill_mask = hole
+        if depth is not None and depth.shape[:2] == (h, w):
+            fg = depth > float(np.percentile(depth, 60))
+            fill_mask = (hole_bool | fg).astype(np.uint8)
+
+        filled = _inpaint_telea(frame, fill_mask * 255, 5)
 
         gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
         if self._prev_filled is not None and self._prev_filled.shape == filled.shape:
-            warped = self._warp_prev(gray)
+            warped, occluded = self._warp_prev(gray)
             a = self.temporal_alpha
             blended = a * filled.astype(np.float32) + (1.0 - a) * warped.astype(np.float32)
+            # Drop the warped contribution where the previous frame had no valid
+            # correspondence (newly disoccluded pixels).
+            blended[occluded] = filled.astype(np.float32)[occluded]
             filled = np.clip(blended, 0, 255).astype(np.uint8)
 
         out = frame.copy()
-        
+
         # Color-aware boundary blending (feathering) for seamless transitions.
         # Create a soft alpha matte from the dilated hole mask.
-        alpha_hole = hole.astype(np.float32)
+        alpha_hole: np.ndarray = hole.astype(np.float32)
         alpha_hole = cv2.GaussianBlur(alpha_hole, (7, 7), 0)
         alpha_hole = np.clip(alpha_hole, 0.0, 1.0)[..., None]
-        
+
         # Blend the filled content over the original frame using the soft matte.
-        out = (filled.astype(np.float32) * alpha_hole + frame.astype(np.float32) * (1.0 - alpha_hole))
+        out = filled.astype(np.float32) * alpha_hole + frame.astype(np.float32) * (1.0 - alpha_hole)
         out = np.clip(out, 0, 255).astype(np.uint8)
 
         self._prev_filled = out
         self._prev_gray = gray
         return out
 
-    def _warp_prev(self, cur_gray: np.ndarray) -> np.ndarray:
+    def _warp_prev(self, cur_gray: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         assert self._prev_filled is not None and self._prev_gray is not None
         flow = cv2.calcOpticalFlowFarneback(  # type: ignore[call-overload]
             cur_gray, self._prev_gray, None, 0.5, 3, 15, 3, 5, 1.2, 0
@@ -104,6 +115,11 @@ class ClassicalInpainter(Inpainter):
         grid_x, grid_y = np.meshgrid(np.arange(w), np.arange(h))
         map_x = (grid_x + flow[..., 0]).astype(np.float32)
         map_y = (grid_y + flow[..., 1]).astype(np.float32)
-        return cv2.remap(
+        warped = cv2.remap(
             self._prev_filled, map_x, map_y, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE
         )
+        back = cv2.calcOpticalFlowFarneback(  # type: ignore[call-overload]
+            self._prev_gray, cur_gray, None, 0.5, 3, 15, 3, 5, 1.2, 0
+        )
+        occluded = compute_occlusion_mask(flow.astype(np.float32), back.astype(np.float32))
+        return warped, occluded

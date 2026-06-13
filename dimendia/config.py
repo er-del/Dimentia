@@ -27,6 +27,7 @@ class RenderMode(str, Enum):
     PARALLAX = "parallax"  # Mode 2 — Depth Parallax
     STEREO = "stereo"  # Mode 3 — Stereo Left/Right (anaglyph or SBS)
     VR = "vr"  # Mode 4 — VR Export (side-by-side / top-bottom)
+    ANAGLYPH = "anaglyph"  # Red-cyan anaglyph (single-image stereo)
 
 
 class DepthBackend(str, Enum):
@@ -40,6 +41,13 @@ class SegmentationBackend(str, Enum):
     AUTO = "auto"
     SAM2 = "sam2"
     CLASSICAL = "classical"  # saliency + motion + GrabCut
+
+
+class SemanticBackend(str, Enum):
+    """Optional semantic prior used to bias extrusion-object selection."""
+
+    NONE = "none"
+    HAAR = "haar"  # OpenCV Haar cascade (e.g. frontal face detection)
 
 
 class InpaintingBackend(str, Enum):
@@ -58,6 +66,7 @@ class ScoringWeights(BaseModel):
     motion: float = 0.25
     saliency: float = 0.20
     center: float = 0.15
+    semantic: float = 0.0
 
 
 class TemporalDepthConfig(BaseModel):
@@ -86,6 +95,16 @@ class PipelineConfig(BaseModel):
     extrusion: float = 100.0  # subjective strength 0..200, scales parallax/pop
     matte_ratio: float = 0.12  # cinematic bar thickness as fraction of height
     stereo_baseline: float = 0.04  # virtual interaxial as fraction of width
+    mesh_warp: bool = False  # use triangle-mesh warping instead of scalar/per-pixel
+
+    # Scene model.
+    num_layers: int = 3  # projectile + (N-2) depth bands + background
+
+    # Stability / quality toggles.
+    scene_cut_threshold: float = 0.6  # Bhattacharyya hist distance that marks a cut
+    adaptive_extrusion: bool = True  # scale extrusion by per-frame depth range
+    bidirectional_depth: bool = False  # forward+backward depth stabilization pass
+    semantic_backend: SemanticBackend = SemanticBackend.HAAR
 
     # Stage configs.
     weights: ScoringWeights = Field(default_factory=ScoringWeights)
@@ -94,14 +113,9 @@ class PipelineConfig(BaseModel):
     # Toggles.
     inpaint: bool = True
     write_depth_preview: bool = False
-    
+
     # Target output framerate. If None, matches input fps.
     output_fps: float | None = None
-
-    @property
-    def num_layers(self) -> int:
-        """Current scene model: projectile / foreground / background."""
-        return 3
 
     @classmethod
     def from_mode(cls, mode: Mode, **overrides: object) -> PipelineConfig:
