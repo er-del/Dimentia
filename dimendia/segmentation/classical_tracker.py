@@ -58,12 +58,10 @@ class ClassicalTracker(ObjectTracker):
 
     def __init__(self, config: PipelineConfig):
         self.config = config
-        self.max_objects = 4
+        self.max_objects = 5
         self.use_grabcut = config.mode != Mode.FAST
-        # Raised min area to filter noise fragments that become black blobs.
-        self.min_area_ratio = 0.01
-        # Lowered max area to avoid selecting the entire frame as foreground.
-        self.max_area_ratio = 0.70
+        self.min_area_ratio = 0.008
+        self.max_area_ratio = 0.65
         self.max_lost = 10  # frames a track survives on Kalman prediction alone
         self._tracks: dict[int, _Track] = {}
         self._next_id = 0
@@ -98,24 +96,34 @@ class ClassicalTracker(ObjectTracker):
     ) -> np.ndarray:
         saliency = spectral_residual_saliency(frame)
         proximity = normalize01(depth)
+        edge = self._depth_edge(depth)
         if flow is not None:
             motion = normalize01(flow_magnitude(flow))
-            fg = 0.45 * motion + 0.30 * saliency + 0.25 * proximity
+            fg = 0.34 * motion + 0.28 * saliency + 0.26 * proximity + 0.12 * edge
         else:  # first frame / static: rely on appearance + depth
-            fg = 0.55 * saliency + 0.45 * proximity
+            fg = 0.40 * saliency + 0.30 * proximity + 0.30 * edge
         return normalize01(fg)
+
+    @staticmethod
+    def _depth_edge(depth: DepthMap) -> np.ndarray:
+        gx = cv2.Sobel(depth, cv2.CV_32F, 1, 0, ksize=3)
+        gy = cv2.Sobel(depth, cv2.CV_32F, 0, 1, ksize=3)
+        edge = np.sqrt(gx * gx + gy * gy)
+        return normalize01(edge)
 
     def _components(self, fg: np.ndarray, h: int, w: int) -> list[np.ndarray]:
         u8 = (fg * 255).astype(np.uint8)
         _, binary = cv2.threshold(u8, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        # Larger kernel for cleaner mask boundaries.
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+        if binary.mean() > 0.28 * 255:
+            thr = int(np.percentile(u8, 92))
+            _, binary = cv2.threshold(u8, thr, 255, cv2.THRESH_BINARY)
+
+        kernel_size = max(3, min(9, self.config.morphology_kernel))
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
         binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
         binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
-        # Additional smoothing pass: dilate then erode to fill small holes.
-        kernel_sm = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-        binary = cv2.dilate(binary, kernel_sm, iterations=1)
-        binary = cv2.erode(binary, kernel_sm, iterations=1)
+        binary = cv2.dilate(binary, kernel, iterations=1)
+        binary = cv2.erode(binary, kernel, iterations=1)
 
         n, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
         frame_area = h * w

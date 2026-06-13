@@ -75,7 +75,9 @@ class ClassicalInpainter(Inpainter):
         # background-colored pixels diffuse into the holes.
         fill_mask = hole
         if depth is not None and depth.shape[:2] == (h, w):
-            fg = depth > float(np.percentile(depth, 60))
+            fg = depth > float(np.percentile(depth, 55))
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+            fg = cv2.dilate(fg.astype(np.uint8), kernel, iterations=1).astype(bool)
             fill_mask = (hole_bool | fg).astype(np.uint8)
 
         filled = _inpaint_telea(frame, fill_mask * 255, 5)

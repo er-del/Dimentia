@@ -58,7 +58,9 @@ class DimendiaPipeline:
         self.temporal = TemporalDepthStabilizer(self.config.temporal)
         self.tracker = build_tracker(self.config, device=device)
         self.selector = ProjectileSelector(
-            self.config.weights, semantic_backend=self.config.semantic_backend
+            self.config.weights,
+            semantic_backend=self.config.semantic_backend,
+            config=self.config,
         )
         self.ldi_builder = LDIBuilder()
         self.flow = OpticalFlow(prefer_raft=device != "cpu", device=device)

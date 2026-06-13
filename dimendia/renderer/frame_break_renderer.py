@@ -86,20 +86,25 @@ class FrameBreakRenderer:
 
         background_layers: list[tuple[np.ndarray, np.ndarray]] = []
         primary: tuple[np.ndarray, np.ndarray] | None = None
+        primary_layer = None
+        primary_center = (w / 2.0, h / 2.0)
+        primary_scale = 1.0
+        primary_dx_max = 0.0
+
         for layer in ldi.layers:  # near -> far
             if layer.index == 0:  # primary extrusion object
-                obj_center = layer_center(layer.alpha)
-                scale = 1.0 + self.config.popout_scale * strength
-                # Stronger primary parallax makes the projectile feel like it comes out of screen.
-                dx_max = -dx_view * (1.8 + 0.8 * strength) * 2.0
+                primary_layer = layer
+                primary_center = layer_center(layer.alpha)
+                primary_scale = 1.0 + self.config.popout_scale * strength
+                primary_dx_max = -dx_view * (1.8 + 0.8 * strength) * 2.0
                 primary = self._warp(
                     layer.color,
                     layer.alpha,
                     layer.depth,
-                    dx_scale=dx_max,
+                    dx_scale=primary_dx_max,
                     dy_scale=0.0,
-                    scale=scale,
-                    center=obj_center,
+                    scale=primary_scale,
+                    center=primary_center,
                     solid=False,
                 )
             else:
@@ -124,12 +129,32 @@ class FrameBreakRenderer:
 
         if primary is not None:
             p_color, p_alpha = primary
+            if bar_mask.any() and primary_layer is not None:
+                # Apply a stronger pop-out warp locally where the object overlaps the cinematic bars.
+                p_color_bar, p_alpha_bar = self._warp(
+                    primary_layer.color,
+                    primary_layer.alpha,
+                    primary_layer.depth,
+                    dx_scale=primary_dx_max * 1.5,
+                    dy_scale=0.0,
+                    scale=primary_scale + 0.04,
+                    center=primary_center,
+                    solid=False,
+                )
+                bar_mask3d = bar_mask[..., None]
+                p_color = np.where(bar_mask3d, p_color_bar, p_color)
+                p_alpha = np.where(bar_mask, p_alpha_bar, p_alpha)
+
             shadow = drop_shadow(p_alpha, offset=int(4 + 6 * strength), blur=int(3 + 4 * strength))
-            # Softer shadow: 0.25 instead of 0.45.
             base = base * (1.0 - 0.25 * shadow[..., None])
             if bar_mask.any():
-                bar_highlight = np.clip(p_alpha[..., None] * self.config.bar_glow, 0.0, 1.0)
-                base = np.where(bar_mask[..., None], np.clip(base + 25.0 * bar_highlight, 0.0, 255.0), base)
+                base = np.clip(base, 0.0, 255.0)
+                bar_highlight = np.clip(p_alpha[..., None] * self.config.bar_glow * 1.3, 0.0, 1.0)
+                base = np.where(
+                    bar_mask[..., None],
+                    np.clip(base + 42.0 * bar_highlight, 0.0, 255.0),
+                    base,
+                )
             base = over(base, p_color.astype(np.float32), p_alpha)
 
-        return to_uint8(base)
+        return to_uint8(np.clip(base, 0.0, 255.0))

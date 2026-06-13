@@ -30,13 +30,15 @@ class ClassicalDepthEstimator(DepthEstimator):
 
     def __init__(
         self,
-        contrast_weight: float = 0.5,
-        vertical_weight: float = 0.3,
-        center_weight: float = 0.2,
+        contrast_weight: float = 0.45,
+        vertical_weight: float = 0.25,
+        center_weight: float = 0.20,
+        edge_weight: float = 0.10,
     ):
         self.contrast_weight = contrast_weight
         self.vertical_weight = vertical_weight
         self.center_weight = center_weight
+        self.edge_weight = edge_weight
 
     def estimate(self, frame: Frame) -> DepthMap:
         gray = to_gray_f32(frame)
@@ -57,10 +59,12 @@ class ClassicalDepthEstimator(DepthEstimator):
         radial = np.sqrt(xx * xx + yy * yy) / np.sqrt(2.0)
         center = 1.0 - radial
 
+        edge = self._edge_strength(gray)
         depth = (
             self.contrast_weight * contrast
             + self.vertical_weight * vprior
             + self.center_weight * center
+            + self.edge_weight * edge
         )
         depth = normalize01(depth)
 
@@ -68,6 +72,13 @@ class ClassicalDepthEstimator(DepthEstimator):
         radius = max(2, int(round(min(h, w) * 0.02)))
         depth = guided_filter(gray, depth, radius=radius, eps=1e-3)
         return normalize01(depth)
+
+    @staticmethod
+    def _edge_strength(gray: np.ndarray) -> np.ndarray:
+        gx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
+        gy = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
+        edge = np.sqrt(gx * gx + gy * gy)
+        return normalize01(edge)
 
     @staticmethod
     def _multiscale_contrast(gray: np.ndarray) -> np.ndarray:

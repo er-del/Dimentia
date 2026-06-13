@@ -19,7 +19,7 @@ from typing import Any
 import cv2
 import numpy as np
 
-from dimendia.config import ScoringWeights, SemanticBackend
+from dimendia.config import PipelineConfig, ScoringWeights, SemanticBackend
 from dimendia.types import Frame, TrackedObject
 
 
@@ -28,10 +28,14 @@ class ProjectileSelector:
         self,
         weights: ScoringWeights | None = None,
         semantic_backend: SemanticBackend = SemanticBackend.HAAR,
+        config: PipelineConfig | None = None,
     ):
         self.weights = weights or ScoringWeights()
         self.semantic_backend = semantic_backend
+        self.config = config
         self._cascade: Any = None
+        self._last_primary_id: int | None = None
+        self._last_primary_score: float = 0.0
 
     def _face_cascade(self) -> Any:
         if self._cascade is None:
@@ -88,16 +92,36 @@ class ProjectileSelector:
             attention = float(np.clip(obj.saliency, 0.0, 1.0))
             semantic = semantic_scores.get(obj.object_id, 0.0)
 
+            size_scale = 1.8
+            stability_bonus = 0.08
+            if self.config is not None:
+                size_scale = 1.0 + self.config.selection_size_penalty * 3.0
+                stability_bonus = self.config.selection_stability
+            size_penalty = 1.0 - np.clip(obj.area_ratio * size_scale, 0.0, 0.6)
+            stability_bonus = stability_bonus if obj.object_id == self._last_primary_id else 0.0
+
             obj.proximity = proximity
             obj.velocity_mag = velocity
             obj.framing = framing
-            obj.score = (
+            raw_score = (
                 wgt.depth * proximity
                 + wgt.motion * velocity
                 + wgt.saliency * attention
                 + wgt.center * framing
                 + wgt.semantic * semantic
             )
+            obj.score = float(raw_score * size_penalty + stability_bonus)
 
         primary = max(objects, key=lambda o: o.score)
-        return primary.object_id
+        preferred = primary
+        threshold = 0.06
+        if self.config is not None:
+            threshold = self.config.selection_switch_threshold
+        if self._last_primary_id is not None:
+            previous = next((o for o in objects if o.object_id == self._last_primary_id), None)
+            if previous is not None and previous.object_id != primary.object_id:
+                if primary.score < previous.score + threshold:
+                    preferred = previous
+        self._last_primary_id = preferred.object_id
+        self._last_primary_score = preferred.score
+        return preferred.object_id

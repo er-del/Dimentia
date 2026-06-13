@@ -94,10 +94,16 @@ class PipelineConfig(BaseModel):
     # Rendering knobs.
     extrusion: float = 100.0  # subjective strength 0..200, scales parallax/pop
     matte_ratio: float = 0.12  # cinematic bar thickness as fraction of height
-    popout_scale: float = 0.06  # additional size boost for the primary object in popout mode
-    bar_glow: float = 0.18  # subtle highlight strength where the object crosses the matte bars
+    popout_scale: float = 0.10  # additional size boost for the primary object in popout mode
+    bar_glow: float = 0.22  # subtle highlight strength where the object crosses the matte bars
     stereo_baseline: float = 0.04  # virtual interaxial as fraction of width
     mesh_warp: bool = False  # use triangle-mesh warping instead of scalar/per-pixel
+
+    # Segmentation / selection.
+    selection_stability: float = 0.18  # reward for keeping the same primary object across frames
+    selection_switch_threshold: float = 0.08  # required score gap to switch primary objects
+    selection_size_penalty: float = 0.16  # penalize overly large object masks so background doesn't dominate
+    morphology_kernel: int = 7  # tracker mask cleanup kernel size
 
     # Scene model.
     num_layers: int = 3  # projectile + (N-2) depth bands + background
