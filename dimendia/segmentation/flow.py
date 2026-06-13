@@ -7,7 +7,7 @@ weights are available; otherwise OpenCV Farneback runs on CPU.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal, overload
 
 import cv2
 import numpy as np
@@ -54,10 +54,27 @@ class OpticalFlow:
         except Exception as exc:  # noqa: BLE001 - graceful fallback
             log.info("optical flow backend: Farneback (RAFT unavailable: %s)", exc)
 
-    def flow(self, prev: Frame, cur: Frame) -> np.ndarray:
-        if self.backend == "raft":
-            return self._raft_flow(prev, cur)
-        return self._farneback_flow(prev, cur)
+    @overload
+    def flow(self, prev: Frame, cur: Frame) -> np.ndarray: ...
+
+    @overload
+    def flow(self, prev: Frame, cur: Frame, return_backward: Literal[False]) -> np.ndarray: ...
+
+    @overload
+    def flow(
+        self, prev: Frame, cur: Frame, return_backward: Literal[True]
+    ) -> tuple[np.ndarray, np.ndarray]: ...
+
+    def flow(
+        self, prev: Frame, cur: Frame, return_backward: bool = False
+    ) -> np.ndarray | tuple[np.ndarray, np.ndarray]:
+        """Forward flow (prev -> cur). If ``return_backward``, also return cur -> prev."""
+        compute = self._raft_flow if self.backend == "raft" else self._farneback_flow
+        forward = compute(prev, cur)
+        if not return_backward:
+            return forward
+        backward = compute(cur, prev)
+        return forward, backward
 
     @staticmethod
     def _farneback_flow(prev: Frame, cur: Frame) -> np.ndarray:
@@ -84,3 +101,30 @@ class OpticalFlow:
 
 def flow_magnitude(flow: np.ndarray) -> np.ndarray:
     return np.sqrt(flow[..., 0] ** 2 + flow[..., 1] ** 2).astype(np.float32)
+
+
+def compute_occlusion_mask(
+    forward_flow: np.ndarray, backward_flow: np.ndarray, threshold: float = 1.5
+) -> np.ndarray:
+    """Forward-backward consistency check; returns a boolean occlusion mask.
+
+    ``forward_flow`` maps the source frame to the target and ``backward_flow``
+    maps target back to source. A source pixel is *occluded* when following the
+    forward flow and then the backward flow does not return to (near) its origin:
+    the round-trip error exceeds ``threshold`` pixels. Mask is in source-frame
+    coordinates.
+    """
+    h, w = forward_flow.shape[:2]
+    grid_x, grid_y = np.meshgrid(np.arange(w), np.arange(h))
+    fx = forward_flow[..., 0]
+    fy = forward_flow[..., 1]
+    map_x = (grid_x + fx).astype(np.float32)
+    map_y = (grid_y + fy).astype(np.float32)
+    bx = cv2.remap(
+        backward_flow[..., 0], map_x, map_y, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE
+    )
+    by = cv2.remap(
+        backward_flow[..., 1], map_x, map_y, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE
+    )
+    err = np.sqrt((fx + bx) ** 2 + (fy + by) ** 2)
+    return err > threshold

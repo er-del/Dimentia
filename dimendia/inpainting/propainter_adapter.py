@@ -31,7 +31,7 @@ import numpy as np
 
 from dimendia.inpainting.base import Inpainter
 from dimendia.logging import get_logger
-from dimendia.types import Frame, Mask
+from dimendia.types import DepthMap, Frame, Mask
 
 log = get_logger(__name__)
 
@@ -55,7 +55,7 @@ class ProPainterAdapter(Inpainter):
         self._frames.clear()
         self._masks.clear()
 
-    def inpaint(self, frame: Frame, mask: Mask) -> Frame:
+    def inpaint(self, frame: Frame, mask: Mask, depth: DepthMap | None = None) -> Frame:
         self._frames.append(frame)
         self._masks.append(mask.astype(bool))
         if len(self._frames) > self.window:

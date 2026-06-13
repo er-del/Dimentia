@@ -10,6 +10,7 @@ SAM2 is not installed, and it keeps the whole pipeline runnable on CPU.
 from __future__ import annotations
 
 import threading
+from dataclasses import dataclass
 
 import cv2
 import numpy as np
@@ -27,7 +28,9 @@ log = get_logger(__name__)
 _GRABCUT_TIMEOUT = 15  # seconds
 
 
-def _grabcut_with_timeout(bgr, gc, bgd, fgd, iterations: int, timeout: int = _GRABCUT_TIMEOUT) -> bool:
+def _grabcut_with_timeout(
+    bgr, gc, bgd, fgd, iterations: int, timeout: int = _GRABCUT_TIMEOUT
+) -> bool:
     """Run cv2.grabCut with a timeout so large masks don't hang the pipeline."""
     exc: list[BaseException | None] = [None]
 
@@ -61,15 +64,18 @@ class ClassicalTracker(ObjectTracker):
         self.min_area_ratio = 0.01
         # Lowered max area to avoid selecting the entire frame as foreground.
         self.max_area_ratio = 0.70
-        self._prev: list[TrackedObject] = []
+        self.max_lost = 10  # frames a track survives on Kalman prediction alone
+        self._tracks: dict[int, _Track] = {}
         self._next_id = 0
+        self._diag = 1.0
 
     def reset(self) -> None:
-        self._prev = []
+        self._tracks = {}
         self._next_id = 0
 
     def track(self, frame: Frame, depth: DepthMap, flow: np.ndarray | None) -> list[TrackedObject]:
         h, w = frame.shape[:2]
+        self._diag = float(np.hypot(h, w))
         fg = self._foreground_probability(frame, depth, flow)
         components = self._components(fg, h, w)
 
@@ -83,7 +89,6 @@ class ClassicalTracker(ObjectTracker):
                 objects.append(obj)
 
         objects = self._associate(objects)
-        self._prev = objects
         return objects
 
     # -- cue fusion ----------------------------------------------------------
@@ -175,32 +180,109 @@ class ClassicalTracker(ObjectTracker):
         )
 
     def _associate(self, objects: list[TrackedObject]) -> list[TrackedObject]:
+        # Advance every track's Kalman prediction one step.
+        predicted: dict[int, tuple[float, float]] = {}
+        for tid, tr in self._tracks.items():
+            pred = tr.kalman.predict()
+            predicted[tid] = (float(pred[0, 0]), float(pred[1, 0]))
+
+        matched: set[int] = set()
         for obj in objects:
+            # Primary association: IoU against tracks seen in the previous frame.
             best_iou = 0.0
-            best_prev: TrackedObject | None = None
-            for prev in self._prev:
-                iou = _mask_iou(obj.mask, prev.mask)
+            best_id: int | None = None
+            for tid, tr in self._tracks.items():
+                if tid in matched or tr.lost != 0 or tr.mask is None:
+                    continue
+                iou = _mask_iou(obj.mask, tr.mask)
                 if iou > best_iou:
                     best_iou = iou
-                    best_prev = prev
-            if best_prev is not None and best_iou > 0.1:
-                obj.object_id = best_prev.object_id
-                obj.velocity = (
-                    obj.centroid[0] - best_prev.centroid[0],
-                    obj.centroid[1] - best_prev.centroid[1],
-                )
-                # Temporal mask smoothing: blend with previous to prevent popping.
-                if obj.mask.shape == best_prev.mask.shape:
-                    blended = (
-                        0.7 * obj.mask.astype(np.float32)
-                        + 0.3 * best_prev.mask.astype(np.float32)
-                    )
-                    obj.mask = blended > 0.4
+                    best_id = tid
+
+            if best_id is not None and best_iou > 0.1:
+                self._update_track(best_id, obj)
+                matched.add(best_id)
+                continue
+
+            # Fallback: nearest Kalman-predicted centroid (revives lost tracks).
+            best_dist = 0.15 * self._diag
+            cand: int | None = None
+            for tid, (px, py) in predicted.items():
+                if tid in matched:
+                    continue
+                dist = float(np.hypot(obj.centroid[0] - px, obj.centroid[1] - py))
+                if dist < best_dist:
+                    best_dist = dist
+                    cand = tid
+            if cand is not None:
+                self._update_track(cand, obj)
+                matched.add(cand)
             else:
-                obj.object_id = self._next_id
-                self._next_id += 1
+                matched.add(self._new_track(obj))
+
+        # Age unmatched tracks; keep them alive on prediction for up to max_lost.
+        for tid in list(self._tracks):
+            if tid in matched:
+                continue
+            tr = self._tracks[tid]
+            tr.lost += 1
+            tr.centroid = predicted.get(tid, tr.centroid)
+            if tr.lost > self.max_lost:
+                del self._tracks[tid]
+
+        for obj in objects:
             obj.velocity_mag = float(np.hypot(*obj.velocity))
         return objects
+
+    def _update_track(self, tid: int, obj: TrackedObject) -> None:
+        tr = self._tracks[tid]
+        prev_cx, prev_cy = tr.centroid
+        obj.object_id = tid
+        obj.velocity = (obj.centroid[0] - prev_cx, obj.centroid[1] - prev_cy)
+        # Temporal mask smoothing: blend with previous to prevent popping.
+        if tr.mask is not None and obj.mask.shape == tr.mask.shape:
+            blended = 0.7 * obj.mask.astype(np.float32) + 0.3 * tr.mask.astype(np.float32)
+            obj.mask = blended > 0.4
+        tr.kalman.correct(np.array([[obj.centroid[0]], [obj.centroid[1]]], dtype=np.float32))
+        tr.centroid = obj.centroid
+        tr.mask = obj.mask
+        tr.lost = 0
+
+    def _new_track(self, obj: TrackedObject) -> int:
+        tid = self._next_id
+        self._next_id += 1
+        obj.object_id = tid
+        obj.velocity = (0.0, 0.0)
+        self._tracks[tid] = _Track(
+            object_id=tid, kalman=_make_kalman(obj.centroid), centroid=obj.centroid, mask=obj.mask
+        )
+        return tid
+
+
+@dataclass
+class _Track:
+    """Persistent per-object state with a constant-velocity Kalman filter."""
+
+    object_id: int
+    kalman: cv2.KalmanFilter
+    centroid: tuple[float, float]
+    mask: np.ndarray | None
+    lost: int = 0
+
+
+def _make_kalman(centroid: tuple[float, float]) -> cv2.KalmanFilter:
+    """Constant-velocity Kalman filter on state ``(cx, cy, vx, vy)``."""
+    kf = cv2.KalmanFilter(4, 2)
+    kf.transitionMatrix = np.array(
+        [[1, 0, 1, 0], [0, 1, 0, 1], [0, 0, 1, 0], [0, 0, 0, 1]], dtype=np.float32
+    )
+    kf.measurementMatrix = np.array([[1, 0, 0, 0], [0, 1, 0, 0]], dtype=np.float32)
+    kf.processNoiseCov = np.eye(4, dtype=np.float32) * 1e-2
+    kf.measurementNoiseCov = np.eye(2, dtype=np.float32) * 1e-1
+    kf.errorCovPost = np.eye(4, dtype=np.float32)
+    cx, cy = centroid
+    kf.statePost = np.array([[cx], [cy], [0.0], [0.0]], dtype=np.float32)
+    return kf
 
 
 def _mask_iou(a: np.ndarray, b: np.ndarray) -> float:

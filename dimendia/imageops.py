@@ -98,3 +98,53 @@ def feather_mask(mask: np.ndarray, radius: int = 3) -> np.ndarray:
         return m
     k = 2 * radius + 1
     return cv2.GaussianBlur(m, (k, k), 0)
+
+
+def matting_refine(
+    alpha: np.ndarray,
+    frame: np.ndarray,
+    depth: np.ndarray,
+    *,
+    edge_dilate: int = 5,
+    window: int = 15,
+) -> np.ndarray:
+    """Refine a coarse alpha matte along depth discontinuities.
+
+    A trimap's *uncertain* band is built from dilated depth edges (``cv2.Canny``).
+    Inside that band each pixel's alpha is re-estimated from local color
+    statistics: the foreground/background colour means within a ``window``x
+    ``window`` neighbourhood are compared and alpha is set to the relative colour
+    distance. Pixels outside the band keep their coarse alpha.
+    """
+    a = np.clip(alpha.astype(np.float32), 0.0, 1.0)
+
+    d8 = (np.clip(depth, 0.0, 1.0) * 255.0).astype(np.uint8)
+    edges = cv2.Canny(d8, 50, 150)
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (edge_dilate * 2 + 1,) * 2)
+    uncertain = cv2.dilate(edges, k) > 0
+    if not uncertain.any():
+        return a
+
+    fg = (a > 0.6).astype(np.float32)
+    bg = (a < 0.4).astype(np.float32)
+
+    ksize = (window, window)
+
+    def win_sum(x: np.ndarray) -> np.ndarray:
+        return cv2.boxFilter(x, ddepth=-1, ksize=ksize, normalize=False)
+
+    rgb = frame.astype(np.float32)
+    eps = 1e-3
+    fg_count = win_sum(fg) + eps
+    bg_count = win_sum(bg) + eps
+    mean_fg = np.stack([win_sum(rgb[..., c] * fg) / fg_count for c in range(3)], axis=-1)
+    mean_bg = np.stack([win_sum(rgb[..., c] * bg) / bg_count for c in range(3)], axis=-1)
+
+    dist_fg = np.sqrt(((rgb - mean_fg) ** 2).sum(axis=-1)) + eps
+    dist_bg = np.sqrt(((rgb - mean_bg) ** 2).sum(axis=-1)) + eps
+    refined_band = dist_bg / (dist_fg + dist_bg)
+
+    out = a.copy()
+    out[uncertain] = refined_band[uncertain].astype(np.float32)
+    k_soft = 2 * (edge_dilate // 2) + 1
+    return np.clip(cv2.GaussianBlur(out, (k_soft, k_soft), 0), 0.0, 1.0).astype(np.float32)

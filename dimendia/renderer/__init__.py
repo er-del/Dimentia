@@ -7,7 +7,7 @@ from dimendia.renderer.stereo_renderer import StereoRenderer
 
 def build_renderer(config: PipelineConfig):
     """Return the renderer implementing ``config.render_mode``."""
-    if config.render_mode in (RenderMode.STEREO, RenderMode.VR):
+    if config.render_mode in (RenderMode.STEREO, RenderMode.VR, RenderMode.ANAGLYPH):
         return StereoRenderer(config)
     return FrameBreakRenderer(config)
 

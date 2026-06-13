@@ -18,6 +18,7 @@ import numpy as np
 
 from dimendia.config import TemporalDepthConfig
 from dimendia.imageops import normalize01
+from dimendia.segmentation.flow import compute_occlusion_mask
 from dimendia.types import DepthMap, Frame
 
 
@@ -38,11 +39,14 @@ class TemporalDepthStabilizer:
         if self._prev_stable is None or self._prev_stable.shape != depth.shape:
             result = depth
         else:
-            warped_prev, flow_mag = self._warp_prev(gray_u8)
+            warped_prev, flow_mag, occluded = self._warp_prev(gray_u8)
             aligned = depth
             if self.config.scale_align:
                 aligned = self._affine_align(depth, warped_prev)
             alpha = self._alpha_map(depth.shape, flow_mag)
+            # The warped prior is invalid where pixels are newly disoccluded;
+            # trust the current frame entirely there.
+            alpha[occluded] = 1.0
             result = alpha * aligned + (1.0 - alpha) * warped_prev
 
         result = normalize01(result)
@@ -52,11 +56,12 @@ class TemporalDepthStabilizer:
 
     # -- internals -----------------------------------------------------------
 
-    def _warp_prev(self, cur_gray_u8: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    def _warp_prev(self, cur_gray_u8: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Warp the previous stabilized depth into the current frame.
 
         Uses backward flow (current -> previous) so each current pixel samples its
-        source in the previous frame.
+        source in the previous frame. Also runs a forward-backward consistency
+        check to flag newly disoccluded pixels whose warped prior is unreliable.
         """
         assert self._prev_stable is not None and self._prev_gray_u8 is not None
         flow = cv2.calcOpticalFlowFarneback(  # type: ignore[call-overload]
@@ -70,7 +75,11 @@ class TemporalDepthStabilizer:
             self._prev_stable, map_x, map_y, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE
         )
         flow_mag = np.sqrt(flow[..., 0] ** 2 + flow[..., 1] ** 2).astype(np.float32)
-        return warped.astype(np.float32), flow_mag
+        back = cv2.calcOpticalFlowFarneback(  # type: ignore[call-overload]
+            self._prev_gray_u8, cur_gray_u8, None, 0.5, 3, 15, 3, 5, 1.2, 0
+        )
+        occluded = compute_occlusion_mask(flow.astype(np.float32), back.astype(np.float32))
+        return warped.astype(np.float32), flow_mag, occluded
 
     @staticmethod
     def _affine_align(cur: np.ndarray, ref: np.ndarray) -> np.ndarray:
