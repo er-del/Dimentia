@@ -20,7 +20,7 @@ checkpoints/
 weights/
 
 # Media outputs / scratch
-
+*.ipynb
 *.mov
 *.avi
 !docs/**/*.mp4

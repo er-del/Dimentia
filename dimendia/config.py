@@ -94,6 +94,8 @@ class PipelineConfig(BaseModel):
     # Rendering knobs.
     extrusion: float = 100.0  # subjective strength 0..200, scales parallax/pop
     matte_ratio: float = 0.12  # cinematic bar thickness as fraction of height
+    popout_scale: float = 0.06  # additional size boost for the primary object in popout mode
+    bar_glow: float = 0.18  # subtle highlight strength where the object crosses the matte bars
     stereo_baseline: float = 0.04  # virtual interaxial as fraction of width
     mesh_warp: bool = False  # use triangle-mesh warping instead of scalar/per-pixel
 

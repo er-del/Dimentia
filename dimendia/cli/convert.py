@@ -116,6 +116,13 @@ def _resolve_render_mode(render_mode: str, stereo: bool, vr: bool, anaglyph: boo
     help="End timestamp (HH:MM:SS, MM:SS, or seconds). Stop processing at this point.",
 )
 @click.option(
+    "--matte-ratio",
+    type=float,
+    default=0.12,
+    show_default=True,
+    help="Cinematic matte bar thickness as fraction of frame height.",
+)
+@click.option(
     "--fps",
     type=float,
     default=None,
@@ -127,6 +134,7 @@ def convert(
     mode: str,
     render_mode: str,
     extrusion: float,
+    matte_ratio: float,
     stereo: bool,
     vr: bool,
     anaglyph: bool,
@@ -145,6 +153,7 @@ def convert(
         Mode(mode),
         render_mode=resolved_render,
         extrusion=extrusion,
+        matte_ratio=matte_ratio,
         depth_backend=DepthBackend(depth_backend),
         segmentation_backend=SegmentationBackend(segmentation_backend),
         inpainting_backend=InpaintingBackend(inpainting_backend),

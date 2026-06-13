@@ -89,10 +89,9 @@ class FrameBreakRenderer:
         for layer in ldi.layers:  # near -> far
             if layer.index == 0:  # primary extrusion object
                 obj_center = layer_center(layer.alpha)
-                # Reduced scale: 3% max instead of 10%.
-                scale = 1.0 + 0.03 * strength
-                # Per-pixel depth warp with moderately exaggerated parallax.
-                dx_max = -dx_view * 1.3 * 2.0
+                scale = 1.0 + self.config.popout_scale * strength
+                # Stronger primary parallax makes the projectile feel like it comes out of screen.
+                dx_max = -dx_view * (1.8 + 0.8 * strength) * 2.0
                 primary = self._warp(
                     layer.color,
                     layer.alpha,
@@ -120,7 +119,7 @@ class FrameBreakRenderer:
                 )
 
         base = composite_back_to_front(list(reversed(background_layers)), h, w)
-        base_u8, _ = add_matte_bars(to_uint8(base), self.config.matte_ratio)
+        base_u8, bar_mask = add_matte_bars(to_uint8(base), self.config.matte_ratio)
         base = base_u8.astype(np.float32)
 
         if primary is not None:
@@ -128,6 +127,9 @@ class FrameBreakRenderer:
             shadow = drop_shadow(p_alpha, offset=int(4 + 6 * strength), blur=int(3 + 4 * strength))
             # Softer shadow: 0.25 instead of 0.45.
             base = base * (1.0 - 0.25 * shadow[..., None])
+            if bar_mask.any():
+                bar_highlight = np.clip(p_alpha[..., None] * self.config.bar_glow, 0.0, 1.0)
+                base = np.where(bar_mask[..., None], np.clip(base + 25.0 * bar_highlight, 0.0, 255.0), base)
             base = over(base, p_color.astype(np.float32), p_alpha)
 
         return to_uint8(base)
